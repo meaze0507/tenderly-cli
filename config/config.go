@@ -10,6 +10,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/tenderly/tenderly-cli/model/actions"
 	"github.com/tenderly/tenderly-cli/userError"
 
 	"github.com/spf13/viper"
@@ -28,8 +29,8 @@ const (
 
 	OrganizationName = "org_name"
 
-	Exports = "exports"
-
+	Exports  = "exports"
+	Actions  = "actions"
 	Projects = "projects"
 )
 
@@ -86,6 +87,7 @@ type ChainConfig struct {
 	PetersburgBlock     BigInt `mapstructure:"petersburg_block,omitempty" yaml:"petersburg_block,omitempty"`
 	IstanbulBlock       BigInt `mapstructure:"istanbul_block,omitempty" yaml:"istanbul_block,omitempty"`
 	BerlinBlock         BigInt `mapstructure:"berlin_block,omitempty" yaml:"berlin_block,omitempty"`
+	LondonBlock         BigInt `mapstructure:"london_block,omitempty" yaml:"london_block,omitempty"`
 }
 
 var DefaultChainConfig = &ChainConfig{
@@ -98,6 +100,8 @@ var DefaultChainConfig = &ChainConfig{
 	ConstantinopleBlock: 0,
 	PetersburgBlock:     0,
 	IstanbulBlock:       0,
+	BerlinBlock:         0,
+	LondonBlock:         0,
 }
 
 func (c *ChainConfig) Config() (*params.ChainConfig, error) {
@@ -146,6 +150,11 @@ func (c *ChainConfig) Config() (*params.ChainConfig, error) {
 		return nil, err
 	}
 
+	londonBlock, err := toInt(c.LondonBlock)
+	if err != nil {
+		return nil, err
+	}
+
 	return &params.ChainConfig{
 		HomesteadBlock:      homesteadBlock,
 		EIP150Block:         eip150Block,
@@ -157,6 +166,7 @@ func (c *ChainConfig) Config() (*params.ChainConfig, error) {
 		PetersburgBlock:     petersburgBlock,
 		IstanbulBlock:       istanbulBlock,
 		BerlinBlock:         berlinBlock,
+		LondonBlock:         londonBlock,
 	}, nil
 }
 
@@ -305,6 +315,7 @@ func WriteExportNetwork(networkId string, network *ExportNetwork) error {
 			PetersburgBlock:     network.ChainConfig.PetersburgBlock,
 			IstanbulBlock:       network.ChainConfig.IstanbulBlock,
 			BerlinBlock:         network.ChainConfig.BerlinBlock,
+			LondonBlock:         network.ChainConfig.LondonBlock,
 		}
 	}
 
@@ -324,6 +335,32 @@ func WriteExportNetwork(networkId string, network *ExportNetwork) error {
 
 	projectConfig.Set(Exports, exports)
 	return WriteProjectConfig()
+}
+
+func IsAnyActionsInit() bool {
+	act := projectConfig.GetStringMap(Actions)
+	return len(act) > 0
+}
+
+func IsActionsInit(projectSlug string) bool {
+	act := projectConfig.GetStringMap(Actions)
+	_, exists := act[projectSlug]
+	return exists
+}
+
+func MustWriteActionsInit(projectSlug string, projectActions *actions.ProjectActions) {
+	act := projectConfig.GetStringMap(Actions)
+	act[projectSlug] = projectActions
+
+	projectConfig.Set(Actions, act)
+	err := WriteProjectConfig()
+	if err != nil {
+		userError.LogErrorf(
+			"write project config: %s",
+			userError.NewUserError(err, "Couldn't write project config file"),
+		)
+		os.Exit(1)
+	}
 }
 
 func SetProjectConfig(key string, value interface{}) {
@@ -376,6 +413,11 @@ func WriteGlobalConfig() error {
 	}
 
 	return nil
+}
+
+// ReadProjectConfig is necessary because viper reader doesn't respect custom unmarshaler
+func ReadProjectConfig() ([]byte, error) {
+	return os.ReadFile(filepath.Join(ProjectDirectory, fmt.Sprintf("%s.yaml", ProjectConfigName)))
 }
 
 func getString(key string) string {

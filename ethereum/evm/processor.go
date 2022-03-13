@@ -12,8 +12,8 @@ import (
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/pkg/errors"
-	"github.com/tenderly/tenderly-cli/commands/state"
 	"github.com/tenderly/tenderly-cli/ethereum"
+	state2 "github.com/tenderly/tenderly-cli/ethereum/state"
 	tenderlyTypes "github.com/tenderly/tenderly-cli/ethereum/types"
 	"github.com/tenderly/tenderly-cli/model"
 	"github.com/tenderly/tenderly-cli/userError"
@@ -61,7 +61,7 @@ func (p *Processor) ProcessTransaction(hash string, force bool) (*model.Transact
 }
 
 func (p *Processor) processTransactions(ethBlock tenderlyTypes.Block, ti int64, force bool) (*model.TransactionState, error) {
-	stateDB := state.NewState(p.client, ethBlock.Number().Value())
+	stateDB := state2.NewState(p.client, ethBlock.Number().Value())
 
 	blockHeader, err := p.client.GetBlockByHash(ethBlock.Hash().String())
 	if err != nil {
@@ -75,6 +75,13 @@ func (p *Processor) processTransactions(ethBlock tenderlyTypes.Block, ti int64, 
 	if p.chainConfig.Clique == nil || blockHeader.Coinbase() != common.BytesToAddress([]byte{}) {
 		coinbase := blockHeader.Coinbase()
 		author = &coinbase
+	}
+
+	if p.chainConfig.IsLondon(ethBlock.Number().Big()) && blockHeader.BaseFeePerGas() == nil {
+		return nil, userError.NewUserError(
+			errors.Wrap(err, "missing block base fee"),
+			fmt.Sprintf("Missing block base fee parameter for block %d, london hard fork is probabbly not activated.", ethBlock.Number().Big()),
+		)
 	}
 
 	header := types.Header{
@@ -93,13 +100,14 @@ func (p *Processor) processTransactions(ethBlock tenderlyTypes.Block, ti int64, 
 		Extra:       blockHeader.ExtraData(),
 		MixDigest:   blockHeader.MixDigest(),
 		Nonce:       blockHeader.Nonce(),
+		BaseFee:     blockHeader.BaseFeePerGas().ToInt(),
 	}
 
 	return p.applyTransactions(ethBlock.Hash(), ethBlock.Transactions()[:ti+1], stateDB, header, author, force)
 }
 
 func (p Processor) applyTransactions(blockHash common.Hash, txs []tenderlyTypes.Transaction,
-	stateDB *state.StateDB, header types.Header, author *common.Address, force bool,
+	stateDB *state2.StateDB, header types.Header, author *common.Address, force bool,
 ) (*model.TransactionState, error) {
 	var txState *model.TransactionState
 	for ti := 0; ti < len(txs); ti++ {
@@ -142,19 +150,10 @@ func (p Processor) applyTransactions(blockHash common.Hash, txs []tenderlyTypes.
 	return txState, nil
 }
 
-func (p Processor) applyTransaction(tx tenderlyTypes.Transaction, stateDB *state.StateDB,
+func (p Processor) applyTransaction(tx tenderlyTypes.Transaction, stateDB *state2.StateDB,
 	header types.Header, author *common.Address,
 ) (*model.TransactionState, error) {
-	var accessList []types.AccessTuple
-	for _, v := range tx.AccessList() {
-		accessList = append(accessList, types.AccessTuple{
-			Address:     v.Address(),
-			StorageKeys: v.StorageKeys(),
-		})
-	}
-	message := types.NewMessage(tx.From(), tx.To(), tx.Nonce().ToInt().Uint64(),
-		tx.Value().ToInt(), tx.Gas().ToInt().Uint64(),
-		tx.GasPrice().ToInt(), tx.Input(), accessList, false)
+	message := newMessage(tx)
 
 	var engine consensus.Engine
 	if p.chainConfig.Clique != nil {
@@ -183,7 +182,30 @@ func (p Processor) applyTransaction(tx tenderlyTypes.Transaction, stateDB *state
 	}, nil
 }
 
-func stateObjects(stateDB *state.StateDB) (stateObjects []*model.StateObject) {
+func newMessage(tx tenderlyTypes.Transaction) types.Message {
+	var accessList []types.AccessTuple
+	for _, v := range tx.AccessList() {
+		accessList = append(accessList, types.AccessTuple{
+			Address:     v.Address(),
+			StorageKeys: v.StorageKeys(),
+		})
+	}
+
+	gasFeeCap := tx.GasFeeCap().ToInt()
+	if gasFeeCap == nil {
+		gasFeeCap = tx.GasPrice().ToInt()
+	}
+	gasTipCap := tx.GasTipCap().ToInt()
+	if gasTipCap == nil {
+		gasTipCap = tx.GasPrice().ToInt()
+	}
+
+	return types.NewMessage(tx.From(), tx.To(), tx.Nonce().ToInt().Uint64(),
+		tx.Value().ToInt(), tx.Gas().ToInt().Uint64(), tx.GasPrice().ToInt(), gasFeeCap, gasTipCap,
+		tx.Input(), accessList, false)
+}
+
+func stateObjects(stateDB *state2.StateDB) (stateObjects []*model.StateObject) {
 	for _, stateObject := range stateDB.GetStateObjects() {
 		if stateObject.Used() {
 			stateObjects = append(stateObjects, &model.StateObject{
@@ -207,14 +229,28 @@ func headers(chain *Chain) (headers []*model.Header) {
 		gasLimit := make([]byte, 8)
 		binary.LittleEndian.PutUint64(gasLimit, header.GasLimit)
 
+		var baseFee []byte
+		if header.BaseFee != nil {
+			baseFee = header.BaseFee.Bytes()
+		}
+
 		headers = append(headers, &model.Header{
-			Number:     header.Number.Int64(),
-			Root:       header.Root.Bytes(),
-			ParentHash: header.ParentHash.Bytes(),
-			Timestamp:  int64(header.Time),
-			Difficulty: header.Difficulty.Bytes(),
-			Coinbase:   header.Coinbase.Bytes(),
-			GasLimit:   gasLimit,
+			Number:      header.Number.Int64(),
+			ReceiptHash: header.ReceiptHash.Bytes(),
+			ParentHash:  header.ParentHash.Bytes(),
+			Root:        header.Root.Bytes(),
+			UncleHash:   header.UncleHash.Bytes(),
+			GasLimit:    gasLimit,
+			TxHash:      header.TxHash.Bytes(),
+			Timestamp:   int64(header.Time),
+			Difficulty:  header.Difficulty.Bytes(),
+			Coinbase:    header.Coinbase.Bytes(),
+			Bloom:       header.Bloom.Bytes(),
+			GasUsed:     header.GasUsed,
+			Extra:       header.Extra,
+			MixDigest:   header.MixDigest.Bytes(),
+			Nonce:       header.Nonce[:],
+			BaseFee:     baseFee,
 		})
 	}
 

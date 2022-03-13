@@ -3,29 +3,30 @@ package providers
 import (
 	"encoding/hex"
 	"fmt"
+	"path/filepath"
+	"time"
+
 	"github.com/tenderly/tenderly-cli/ethereum"
 	"github.com/tenderly/tenderly-cli/model"
 	"github.com/tenderly/tenderly-cli/stacktrace"
-	"path/filepath"
-	"time"
 )
 
 type DeploymentProvider interface {
 	GetConfig(configName string, configDir string) (*Config, error)
 	MustGetConfig() (*Config, error)
 	CheckIfProviderStructure(directory string) bool
-	NewContractSource(path string, networkId string, client ethereum.Client) (stacktrace.ContractSource, error)
 	GetProviderName() DeploymentProviderName
 	GetContracts(buildDir string, networkIDs []string, objects ...*model.StateObject) ([]Contract, int, error)
 }
 
 type Config struct {
-	ProjectDirectory string                   `json:"project_directory"`
-	BuildDirectory   string                   `json:"contracts_build_directory"`
-	Networks         map[string]NetworkConfig `json:"networks"`
-	Solc             map[string]Optimizer     `json:"solc"`
-	Compilers        map[string]Compiler      `json:"compilers"`
+	ProjectDirectory string                   `json:"project_directory" yaml:"project_directory"`
+	BuildDirectory   string                   `json:"contracts_build_directory" yaml:"build_directory"`
+	Networks         map[string]NetworkConfig `json:"networks" yaml:"-"`
+	Solc             map[string]Optimizer     `json:"solc" yaml:"solc"`
+	Compilers        map[string]Compiler      `json:"compilers" yaml:"compiler"`
 	ConfigType       string                   `json:"-"`
+	Paths            Paths                    `json:"paths" yaml:"paths"`
 }
 
 type OZProjectData struct {
@@ -51,8 +52,16 @@ func (c *Config) AbsoluteBuildDirectoryPath() string {
 		c.BuildDirectory = filepath.Join(".", "build", "contracts")
 	}
 
+	if c.ConfigType == BrownieConfigFile {
+		c.BuildDirectory = filepath.Join(".", "build")
+	}
+
 	if c.ConfigType == BuidlerConfigFile || c.ConfigType == HardhatConfigFile || c.ConfigType == HardhatConfigFileTs {
-		c.BuildDirectory = filepath.Join(".", "deployments")
+		if c.Paths.Deployments != "" {
+			c.BuildDirectory = c.Paths.Deployments
+		} else {
+			c.BuildDirectory = filepath.Join(".", "deployments")
+		}
 	}
 
 	switch c.BuildDirectory[0] {
@@ -63,6 +72,14 @@ func (c *Config) AbsoluteBuildDirectoryPath() string {
 	}
 }
 
+type Paths struct {
+	Sources     string `json:"sources,omitempty"`
+	Tests       string `json:"tests,omitempty"`
+	Cache       string `json:"cache,omitempty"`
+	Artifacts   string `json:"artifacts,omitempty"`
+	Deployments string `json:"deployments,omitempty"`
+}
+
 type NetworkConfig struct {
 	Host      string      `json:"host"`
 	Port      int         `json:"port"`
@@ -71,10 +88,11 @@ type NetworkConfig struct {
 }
 
 type Compiler struct {
-	Version    string            `json:"version"`
-	Settings   *CompilerSettings `json:"settings"`
-	Optimizer  *Optimizer        `json:"optimizer"`
-	EvmVersion *string           `json:"evmVersion"`
+	Version    string            `json:"version" yaml:"version"`
+	Settings   *CompilerSettings `json:"settings" yaml:"settings"`
+	Optimizer  *Optimizer        `json:"optimizer" yaml:"optimizer"`
+	EvmVersion *string           `json:"evmVersion" yaml:"evm_version"`
+	Remappings []string          `json:"remappings" yaml:"remappings"`
 }
 
 type CompilerSettings struct {
@@ -83,8 +101,26 @@ type CompilerSettings struct {
 }
 
 type Optimizer struct {
-	Enabled *bool `json:"enabled"`
-	Runs    *int  `json:"runs"`
+	Enabled *bool             `json:"enabled"`
+	Runs    *int              `json:"runs"`
+	Details *OptimizerDetails `json:"details,omitempty"`
+}
+
+type OptimizerDetails struct {
+	Peephole          *bool       `json:"peephole,omitempty"`
+	JumpdestRemover   *bool       `json:"jumpdestRemover,omitempty"`
+	OrderLiterals     *bool       `json:"orderLiterals,omitempty"`
+	Deduplicate       *bool       `json:"deduplicate,omitempty"`
+	Cse               *bool       `json:"cse,omitempty"`
+	ConstantOptimizer *bool       `json:"constantOptimizer,omitempty"`
+	Yul               *bool       `json:"yul,omitempty"`
+	Inliner           *bool       `json:"inliner,omitempty"`
+	YulDetails        *YulDetails `json:"yulDetails,omitempty"`
+}
+
+type YulDetails struct {
+	StackAllocation *bool   `json:"stackAllocation,omitempty"`
+	OptimizerSteps  *string `json:"optimizerSteps,omitempty"`
 }
 
 type Contract struct {
@@ -123,6 +159,7 @@ type ContractNetwork struct {
 type Node struct {
 	NodeType     string `json:"nodeType"`
 	AbsolutePath string `json:"absolutePath"`
+	File         string `json:"file"`
 }
 
 type ContractAst struct {
@@ -132,6 +169,12 @@ type ContractAst struct {
 	NodeType        string           `json:"nodeType"`
 	Nodes           []Node           `json:"nodes"`
 	Src             string           `json:"src"`
+}
+
+type ContractTag struct {
+	Tag string `json:"tag"`
+
+	CreatedAt time.Time `json:"created_at,omitempty"`
 }
 
 type ApiContract struct {
@@ -146,6 +189,8 @@ type ApiContract struct {
 	Address string `json:"address"`
 
 	Name string `json:"contract_name"`
+
+	Tags []*ContractTag `json:"tags,omitempty"`
 
 	Abi       string `json:"abi"`
 	Bytecode  string `json:"bytecode"`

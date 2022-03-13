@@ -3,16 +3,17 @@ package hardhat
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/ethereum/go-ethereum/common/hexutil"
-	"github.com/pkg/errors"
-	"github.com/tenderly/tenderly-cli/model"
-	"github.com/tenderly/tenderly-cli/providers"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
+	"github.com/tenderly/tenderly-cli/model"
+	"github.com/tenderly/tenderly-cli/providers"
 )
 
 type HardhatContract struct {
@@ -36,7 +37,7 @@ func (dp *DeploymentProvider) GetContracts(
 	networkIDs []string,
 	objects ...*model.StateObject,
 ) ([]providers.Contract, int, error) {
-	files, err := ioutil.ReadDir(buildDir)
+	files, err := os.ReadDir(buildDir)
 	if err != nil {
 		return nil, 0, errors.Wrap(err, "failed listing build files")
 	}
@@ -63,30 +64,37 @@ func (dp *DeploymentProvider) GetContracts(
 			continue
 		}
 		filePath := filepath.Join(buildDir, file.Name())
-		contractFiles, err := ioutil.ReadDir(filePath)
+		contractFiles, _ := os.ReadDir(filePath)
 
+		successfulRead := true
 		for _, contractFile := range contractFiles {
 			if contractFile.IsDir() || !strings.HasSuffix(contractFile.Name(), ".json") {
 				continue
 			}
 			contractFilePath := filepath.Join(filePath, contractFile.Name())
-			data, err := ioutil.ReadFile(contractFilePath)
+			data, err := os.ReadFile(contractFilePath)
 
 			if err != nil {
-				return nil, 0, errors.Wrap(err, "failed reading build file")
+				logrus.Debug(fmt.Sprintf("Failed reading build file at %s with error: %s", contractFilePath, err))
+				successfulRead = false
+				break
 			}
 
 			var hardhatContract HardhatContract
 			var hardhatMeta hardhatMetadata
 			err = json.Unmarshal(data, &hardhatContract)
 			if err != nil {
-				return nil, 0, errors.Wrap(err, "failed parsing build file")
+				logrus.Debug(fmt.Sprintf("Failed parsing build file at %s with error: %s", contractFilePath, err))
+				successfulRead = false
+				break
 			}
 
 			if hardhatContract.Metadata != "" {
 				err = json.Unmarshal([]byte(hardhatContract.Metadata), &hardhatMeta)
 				if err != nil {
-					return nil, 0, errors.Wrap(err, "failed parsing build file")
+					logrus.Debug(fmt.Sprintf("Failed parsing build file metadata at %s with error: %s", contractFilePath, err))
+					successfulRead = false
+					break
 				}
 			}
 
@@ -118,15 +126,19 @@ func (dp *DeploymentProvider) GetContracts(
 				} else {
 					chainIdPath := filepath.Join(filePath, ".chainId")
 
-					chainData, err := ioutil.ReadFile(chainIdPath)
+					chainData, err := os.ReadFile(chainIdPath)
 					if err != nil {
-						return nil, 0, errors.Wrap(err, "failed reading chainId file")
+						logrus.Debug(fmt.Sprintf("Failed reading chainID file at %s with error: %s", chainIdPath, err))
+						successfulRead = false
+						break
 					}
 
 					var chainId int
 					err = json.Unmarshal(chainData, &chainId)
 					if err != nil {
-						return nil, 0, errors.Wrap(err, "failed parsing build file")
+						logrus.Debug(fmt.Sprintf("Failed parsing chainID file at %s with error: %s", chainIdPath, err))
+						successfulRead = false
+						break
 					}
 
 					contract.Networks[strconv.Itoa(chainId)] = providers.ContractNetwork{
@@ -189,14 +201,16 @@ func (dp *DeploymentProvider) GetContracts(
 				}
 			}
 
-			sourceKey := fmt.Sprintf("contracts/%s.sol", contract.Name)
-
-			if val, ok := hardhatMeta.Sources[sourceKey]; ok {
+			if val, ok := hardhatMeta.Sources[contract.SourcePath]; ok {
 				contract.Source = val.Content
 			}
 
 			contracts = append(contracts, contract)
 			numberOfContractsWithANetwork += len(contract.Networks)
+		}
+
+		if !successfulRead {
+			continue
 		}
 
 		for localPath, included := range sources {
@@ -205,7 +219,9 @@ func (dp *DeploymentProvider) GetContracts(
 				if len(localPath) > 0 && localPath[0] == '@' {
 					localPath, err = os.Getwd()
 					if err != nil {
-						return nil, 0, errors.Wrap(err, "failed getting working dir")
+						logrus.Debug(fmt.Sprintf("Failed getting working dir at %s with error: %s", currentLocalPath, err))
+						successfulRead = false
+						continue
 					}
 
 					if runtime.GOOS == "windows" {
@@ -220,7 +236,7 @@ func (dp *DeploymentProvider) GetContracts(
 					}
 				}
 
-				source, err := ioutil.ReadFile(localPath)
+				source, err := os.ReadFile(localPath)
 				if err != nil {
 					localPath = filepath.Join("node_modules", currentLocalPath)
 					doesNotExist := providers.CheckIfFileDoesNotExist(localPath)
@@ -228,9 +244,11 @@ func (dp *DeploymentProvider) GetContracts(
 						localPath = providers.GetGlobalPathForModule(currentLocalPath)
 					}
 
-					source, err := ioutil.ReadFile(localPath)
+					source, err := os.ReadFile(localPath)
 					if err != nil {
-						return nil, 0, errors.Wrap(err, "failed reading contract source file")
+						logrus.Debug(fmt.Sprintf("Failed reading contract source file at %s with error: %s", localPath, err))
+						successfulRead = false
+						continue
 					}
 
 					contracts = append(contracts, providers.Contract{
